@@ -93,13 +93,13 @@ meson_static() { # meson_static <组件> [选项…]
 )
 [[ -f "$PREFIX/lib/pkgconfig/zlib.pc" ]] || { echo 'zlib.pc missing' >&2; exit 1; }
 
-meson_static freetype -Dbrotli=disabled -Dharfbuzz=disabled -Dpng=disabled -Dzlib=system -Dbzip2=disabled \
+meson_static freetype -Dbrotli=disabled -Dharfbuzz=disabled -Dpng=disabled -Dzlib=system \
   -Dtests=disabled
 meson_static fribidi -Ddocs=false -Dbin=false -Dtests=false
 meson_static harfbuzz -Dfreetype=enabled -Dglib=disabled -Dgobject=disabled -Dcairo=disabled -Dchafa=disabled \
   -Dicu=disabled -Dgraphite=disabled -Dfontations=disabled -Dgdi=disabled -Ddirectwrite=disabled \
   -Dcoretext=disabled -Dharfrust=disabled -Dkbts=disabled -Dwasm=disabled -Draster=disabled -Dvector=disabled \
-  -Dgpu=disabled -Dgpu_demo=false -Dsubset=disabled -Dtests=disabled -Dintrospection=disabled -Ddocs=disabled \
+  -Dgpu=disabled -Dgpu_demo=disabled -Dsubset=disabled -Dtests=disabled -Dintrospection=disabled -Ddocs=disabled \
   -Dutilities=disabled -Dbenchmark=disabled -Dpng=disabled -Dzlib=disabled
 meson_static libass -Dfontconfig=disabled -Ddirectwrite=enabled -Dcoretext=disabled -Dasm=enabled \
   -Dlibunibreak=disabled -Drequire-system-font-provider=false -Dtest=disabled -Dcompare=disabled \
@@ -108,7 +108,7 @@ meson_static dav1d -Denable_tools=false -Denable_examples=false -Denable_tests=f
   -Dbitdepths="['8','16']"
 
 # ---- 4. FFmpeg（LGPL-3.0+：--enable-version3，不加 --enable-gpl / --enable-nonfree；与 Android / iOS 的构建一致） ----
-# 只保留播放需要的部分：协议只有 http / tcp（所有请求经本地媒体代理，见 lib/shared/video/player_options.dart），
+# 只保留播放需要的部分：协议只有 http / tcp（Tsumugi 的所有播放请求经其本地媒体代理，FFmpeg 的协议白名单只有 http,tcp），
 # 不带 TLS、不带 DASH（apiVersion 1 不支持）、不带 rtmp / rtsp / udp / file 等。
 FF_DECODERS=(
   h264 hevc vp8 vp9 av1 libdav1d mpeg1video mpeg2video mpeg4 h263 h263p flv vp6 vp6a vp6f theora
