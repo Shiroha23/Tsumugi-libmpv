@@ -62,6 +62,7 @@ cpp = '$TRIPLE-g++-posix'
 ar = '$TRIPLE-ar'
 strip = '$TRIPLE-strip'
 windres = '$TRIPLE-windres'
+dlltool = '$TRIPLE-dlltool'
 nasm = 'nasm'
 pkg-config = 'pkg-config'
 
