@@ -215,7 +215,7 @@ PY
 
 # 只允许依赖 Windows 系统 DLL（全部第三方组件都应静态链接）。
 "$TRIPLE-objdump" -p "$DLL" | awk '/DLL Name:/ {print tolower($3)}' | sort -u > "$WORK/imports.txt"
-SYSTEM_DLLS='^(kernel32|user32|gdi32|advapi32|shell32|ole32|oleaut32|shlwapi|ws2_32|bcrypt|avrt|winmm|dwrite|d3d11|dxgi|d3d9|dxva2|uuid|version|secur32|ntdll|msvcrt|api-ms-win-[a-z0-9-]+|ucrtbase|mfplat|mfuuid|strmiids|propsys|imm32|comdlg32|uxtheme|dwmapi|powrprof|setupapi|cfgmgr32|opengl32|pathcch)\.dll$'
+SYSTEM_DLLS='^(kernel32|user32|gdi32|advapi32|shell32|ole32|oleaut32|shlwapi|ws2_32|bcrypt|avrt|winmm|dwrite|d3d11|dxgi|d3d9|dxva2|uuid|version|secur32|ntdll|msvcrt|api-ms-win-[a-z0-9-]+|ucrtbase|mfplat|mfuuid|strmiids|propsys|imm32|comdlg32|uxtheme|dwmapi|powrprof|setupapi|cfgmgr32|opengl32|pathcch|shcore)\.dll$'
 if grep -v -E "$SYSTEM_DLLS" "$WORK/imports.txt"; then
   echo 'libmpv-2.dll imports non-system DLLs (listed above)' >&2; exit 1
 fi
