@@ -242,11 +242,15 @@ cp "$PREFIX"/include/mpv/*.h "$PKG/include/"
   printf '%q ' "${FF_CONFIGURE[@]}" | sed "s#$PREFIX#<prefix>#g"
   echo
   echo
-  echo "## mpv 特性"
+  echo "## mpv 实际启用的特性（config.h 中为 1 的 HAVE_*）"
+  sed -n 's/^#define HAVE_\([A-Z0-9_]*\) 1$/\1/p' "$BUILD/mpv/config.h" | tr 'A-Z_' 'a-z-' | sort | tr '\n' ' '
+  echo
+  echo
+  echo "## mpv meson 选项（gpl / libmpv / cplayer 与显式开启的特性；其余为 auto，被 --auto-features=disabled 关闭）"
   python3 - "$BUILD/mpv/meson-info/intro-buildoptions.json" <<'PY'
 import json, sys
 for o in json.load(open(sys.argv[1])):
-    if o["section"] == "user":
+    if o["section"] == "user" and o["value"] not in ("auto",):
         print(f'{o["name"]}={o["value"]}')
 PY
   echo
