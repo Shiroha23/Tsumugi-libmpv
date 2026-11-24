@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# 在 Ubuntu 24.04 上用 mingw-w64 交叉编译 Windows x64 的 libmpv-2.dll（LGPL），供 Tsumugi 的 Windows 版使用。
+# 在 Linux x86_64（CI 为 Ubuntu 24.04）上交叉编译 Windows x64 的 libmpv-2.dll（LGPL），供 Tsumugi 的 Windows 版使用。
 #
 # 用法：windows/build.sh <工作目录> <输出目录>
-#   依赖（apt）：gcc-mingw-w64-x86-64-posix g++-mingw-w64-x86-64-posix mingw-w64-tools nasm meson ninja-build
-#               pkgconf python3 curl xz-utils zip binutils-mingw-w64-x86-64
+#   需要：meson、ninja、nasm、pkg-config、python3、curl、xz、zip、binutils（strings）。
+#   交叉编译工具链（llvm-mingw，UCRT）由本脚本按 toolchain.tsv 下载并校验 sha256。
 #
 # 只用 sources.tsv 中按 sha256 校验过的发布包；所有依赖静态链接进 libmpv-2.dll（只依赖 Windows 系统 DLL）。
 # 输出：
@@ -26,15 +26,26 @@ JOBS=$(nproc)
 rm -rf "$SRC" "$BUILD" "$PREFIX"
 mkdir -p "$DL" "$SRC" "$BUILD" "$PREFIX"
 
+fetch() { # fetch <地址> <sha256> <保存路径>
+  if [[ ! -f "$3" ]] || ! echo "$2  $3" | sha256sum -c --status -; then
+    curl -fsSL --retry 3 --proto '=https' -o "$3.part" "$1"
+    mv "$3.part" "$3"
+  fi
+  echo "$2  $3" | sha256sum -c -
+}
+
+# ---- 0. 工具链 ----
+IFS=$'\t' read -r TC_NAME TC_VERSION TC_URL TC_SHA TC_FILE < <(grep -v '^#' "$HERE/toolchain.tsv")
+fetch "$TC_URL" "$TC_SHA" "$DL/$TC_FILE"
+rm -rf "$WORK/toolchain"; mkdir -p "$WORK/toolchain"
+tar -xf "$DL/$TC_FILE" -C "$WORK/toolchain" --strip-components=1
+export PATH="$WORK/toolchain/bin:$PATH"
+
 # ---- 1. 下载并校验 ----
 declare -A FILE
 while IFS=$'\t' read -r name version license url sha file; do
   [[ -z "$name" || "$name" == \#* ]] && continue
-  if [[ ! -f "$DL/$file" ]] || ! echo "$sha  $DL/$file" | sha256sum -c --status -; then
-    curl -fsSL --retry 3 --proto '=https' -o "$DL/$file.part" "$url"
-    mv "$DL/$file.part" "$DL/$file"
-  fi
-  echo "$sha  $DL/$file" | sha256sum -c -
+  fetch "$url" "$sha" "$DL/$file"
   FILE[$name]=$DL/$file
 done < "$HERE/sources.tsv"
 
@@ -57,8 +68,8 @@ export PKG_CONFIG_SYSROOT_DIR=
 CROSS=$WORK/cross.txt
 cat > "$CROSS" <<EOF
 [binaries]
-c = '$TRIPLE-gcc-posix'
-cpp = '$TRIPLE-g++-posix'
+c = '$TRIPLE-clang'
+cpp = '$TRIPLE-clang++'
 ar = '$TRIPLE-ar'
 strip = '$TRIPLE-strip'
 windres = '$TRIPLE-windres'
@@ -88,7 +99,7 @@ meson_static() { # meson_static <组件> [选项…]
 # ---- 3. 依赖（全部静态库） ----
 (
   cd "$SRC/zlib"
-  CHOST=$TRIPLE CC=$TRIPLE-gcc-posix ./configure --static --prefix="$PREFIX"
+  CHOST=$TRIPLE CC=$TRIPLE-clang AR=$TRIPLE-ar RANLIB=$TRIPLE-ranlib ./configure --static --prefix="$PREFIX"
   make -j "$JOBS" libz.a
   make install-libs install-headers 2>/dev/null || make install
 )
@@ -133,7 +144,7 @@ join() { local IFS=,; echo "$*"; }
 mkdir -p "$BUILD/ffmpeg"
 FF_CONFIGURE=(
   --prefix="$PREFIX" --arch=x86_64 --target-os=mingw32 --cross-prefix="$TRIPLE-" --enable-cross-compile
-  --cc="$TRIPLE-gcc-posix" --cxx="$TRIPLE-g++-posix" --pkg-config=pkg-config --pkg-config-flags=--static
+  --cc="$TRIPLE-clang" --cxx="$TRIPLE-clang++" --pkg-config=pkg-config --pkg-config-flags=--static
   --enable-version3 --enable-static --disable-shared --disable-programs --disable-doc --disable-debug --disable-autodetect
   --disable-everything --disable-avdevice
   --enable-avcodec --enable-avformat --enable-avfilter --enable-swscale --enable-swresample --enable-network
@@ -155,10 +166,10 @@ meson_static libplacebo -Dvulkan=disabled -Dvk-proc-addr=disabled -Dopengl=enabl
   -Dd3d11=disabled -Dglslang=disabled -Dshaderc=disabled -Dlcms=disabled -Ddovi=enabled -Dlibdovi=disabled \
   -Ddemos=false -Dtests=false -Dbench=false -Dfuzz=false -Dunwind=disabled -Dxxhash=disabled
 
-# libplacebo / HarfBuzz 含 C++ 代码，而 mpv 用 C 编译器链接：静态链接时需要显式带上 libstdc++。
+# libplacebo / HarfBuzz 含 C++ 代码，而 mpv 用 C 编译器链接：静态链接时需要显式带上 libc++ 与 libunwind。
 for pc in libplacebo harfbuzz; do
-  grep -q -- '-lstdc++' "$PREFIX/lib/pkgconfig/$pc.pc" ||
-    sed -i 's/^Libs.private:/Libs.private: -lstdc++/; t; $a Libs.private: -lstdc++' "$PREFIX/lib/pkgconfig/$pc.pc"
+  grep -q -- '-lc++' "$PREFIX/lib/pkgconfig/$pc.pc" ||
+    sed -i 's/^Libs.private:/Libs.private: -lc++ -lunwind/; t; $a Libs.private: -lc++ -lunwind' "$PREFIX/lib/pkgconfig/$pc.pc"
 done
 
 # ---- 6. mpv → libmpv-2.dll ----
@@ -168,8 +179,8 @@ meson setup "$BUILD/mpv" "$SRC/mpv" --cross-file "$CROSS" --prefix "$PREFIX" --l
   --auto-features=disabled -Dgpl=false -Dcplayer=false -Dlibmpv=true -Dbuild-date=false -Dtests=false \
   -Dgl=enabled -Dplain-gl=enabled -Dd3d-hwaccel=enabled -Dwasapi=enabled -Dwin32-threads=enabled \
   -Dzlib=enabled -Dvector=enabled \
-  -Dc_link_args="['-static', '-static-libgcc', '-static-libstdc++', '-Wl,--gc-sections']" \
-  -Dcpp_link_args="['-static', '-static-libgcc', '-static-libstdc++', '-Wl,--gc-sections']"
+  -Dc_link_args="['-static', '-Wl,--gc-sections']" \
+  -Dcpp_link_args="['-static', '-Wl,--gc-sections']"
 ninja -C "$BUILD/mpv" -j "$JOBS"
 ninja -C "$BUILD/mpv" install
 
@@ -185,7 +196,7 @@ grep -q 'LGPL version 3 or later' "$WORK/strings.txt" || { echo 'FFmpeg license 
 if grep -E -- '--enable-(gpl|nonfree)' "$WORK/strings.txt"; then
   echo 'FFmpeg configured with GPL / nonfree' >&2; exit 1
 fi
-python3 -"$BUILD/mpv/meson-info/intro-buildoptions.json" <<'PY'
+python3 - "$BUILD/mpv/meson-info/intro-buildoptions.json" <<'PY'
 import json, sys
 opts = {o["name"]: o["value"] for o in json.load(open(sys.argv[1]))}
 if opts.get("gpl") is not False:
@@ -211,8 +222,11 @@ cp "$PREFIX"/include/mpv/*.h "$PKG/include/"
   grep -v '^#' "$HERE/sources.tsv"
   echo
   echo "## 工具链"
-  dpkg-query -W -f '${Package} ${Version}\n' gcc-mingw-w64-x86-64-posix g++-mingw-w64-x86-64-posix \
-    mingw-w64-common mingw-w64-x86-64-dev binutils-mingw-w64-x86-64 nasm meson ninja-build 2>/dev/null || true
+  echo "$TC_NAME $TC_VERSION ($TC_FILE, sha256 $TC_SHA)"
+  "$TRIPLE-clang" --version | head -1
+  echo "meson $(meson --version)"
+  echo "ninja $(ninja --version)"
+  nasm -v
   echo
   echo "## FFmpeg configure"
   printf '%q ' "${FF_CONFIGURE[@]}" | sed "s#$PREFIX#<prefix>#g"

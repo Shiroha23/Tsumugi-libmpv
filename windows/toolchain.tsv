@@ -1,0 +1,3 @@
+# 构建工具链（不随产物分发的部分除外，见 README）：build.sh 下载并按 sha256 校验后使用。
+# 列：名称<TAB>版本<TAB>下载地址<TAB>sha256<TAB>保存文件名
+llvm-mingw	20261104	https://github.com/mstorsjo/llvm-mingw/releases/download/20261104/llvm-mingw-20261104-ucrt-ubuntu-22.04-x86_64.tar.xz	919380403de87dca3c581c2053230cd298af5e891286628ba0613b7fed370926	llvm-mingw-20261104-ucrt-ubuntu-22.04-x86_64.tar.xz

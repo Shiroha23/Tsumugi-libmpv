@@ -15,15 +15,17 @@ Tsumugi 按固定的 Release 地址与 sha256 下载并校验产物。
 
 ## 构建
 
-Windows：在 Ubuntu 24.04 上用 mingw-w64 交叉编译。
+Windows：在 Linux x86_64（CI 为 Ubuntu 24.04）上用 llvm-mingw（UCRT）交叉编译。工具链由脚本按 `windows/toolchain.tsv`
+下载并校验 sha256，宿主上只需要 meson、ninja、nasm、pkg-config、python3、curl、xz、zip 与 binutils。
 
 ```sh
-sudo apt-get install gcc-mingw-w64-x86-64-posix g++-mingw-w64-x86-64-posix binutils-mingw-w64-x86-64 \
-  mingw-w64-tools nasm meson ninja-build pkgconf python3 curl xz-utils zip
+sudo apt-get install nasm pkg-config python3-venv curl xz-utils zip binutils
+python3 -m venv venv && venv/bin/pip install meson==1.6.1 ninja==1.11.1.3 && export PATH=$PWD/venv/bin:$PATH
 bash windows/build.sh <工作目录> <输出目录>
 ```
 
 - `windows/sources.tsv`：全部组件的版本、许可证、下载地址与 sha256；脚本只用校验通过的源码包。
+- `windows/toolchain.tsv`：交叉编译工具链的版本、下载地址与 sha256。
 - `windows/build.sh`：配置与编译步骤，最后检查许可证（FFmpeg 必须是 LGPL、不含 GPL / nonfree 组件，mpv 以 `-Dgpl=false` 构建）
   和导入表（只允许 Windows 系统 DLL）。
 - 输出 `<TAG>.zip`（`libmpv-2.dll`、`libmpv.dll.a`、`include/*.h`、`BUILD_INFO.txt`）、`<TAG>-sources.tar`（对应源码）与 `SHA256SUMS`。
@@ -39,4 +41,5 @@ bash windows/build.sh <工作目录> <输出目录>
 
 - 本仓库的构建脚本：GPL-3.0-or-later（见 `LICENSE`）。
 - 产物：mpv 为 LGPL-2.1-or-later，FFmpeg 为 LGPL-3.0-or-later；其余组件的许可证见 `windows/sources.tsv`，
-  许可证全文与版权声明随源码包中的各组件源码提供。
+  许可证全文与版权声明随源码包中的各组件源码提供。静态链接进 DLL 的工具链运行库（mingw-w64 CRT 与 winpthreads、
+  LLVM 的 libc++ / libunwind / compiler-rt）为宽松许可证，版本见 `BUILD_INFO.txt`。
