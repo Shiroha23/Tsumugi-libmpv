@@ -60,6 +60,9 @@ for sub in glad jinja markupsafe fast_float; do
   rm -rf "$SRC/libplacebo/3rdparty/$sub"
   extract "$sub" "$SRC/libplacebo/3rdparty/$sub"
 done
+# libplacebo 的 Vulkan 桩代码（即使不启用 Vulkan 后端）需要这份头文件子模块。
+rm -rf "$SRC/libplacebo/3rdparty/Vulkan-Headers"
+extract vulkan-headers "$SRC/libplacebo/3rdparty/Vulkan-Headers"
 
 # ---- 2. 交叉编译环境 ----
 export PKG_CONFIG_LIBDIR="$PREFIX/lib/pkgconfig"
@@ -78,8 +81,8 @@ nasm = 'nasm'
 pkg-config = 'pkg-config'
 
 [built-in options]
-c_args = ['-O2', '-D_WIN32_WINNT=0x0A00']
-cpp_args = ['-O2', '-D_WIN32_WINNT=0x0A00']
+c_args = ['-O2']
+cpp_args = ['-O2']
 
 [host_machine]
 system = 'windows'
