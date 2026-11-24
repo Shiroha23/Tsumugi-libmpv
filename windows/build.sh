@@ -60,6 +60,12 @@ for sub in glad jinja markupsafe fast_float; do
   rm -rf "$SRC/libplacebo/3rdparty/$sub"
   extract "$sub" "$SRC/libplacebo/3rdparty/$sub"
 done
+# 本仓库的补丁（windows/patches/<组件>-*.patch，-p1），说明写在各补丁文件开头。
+for patch in "$HERE"/patches/*.patch; do
+  [[ -e "$patch" ]] || continue
+  component=$(basename "$patch"); component=${component%%-*}
+  patch -d "$SRC/$component" -p1 --forward < "$patch"
+done
 # libplacebo 的 Vulkan 桩代码（即使不启用 Vulkan 后端）需要这份头文件子模块。
 rm -rf "$SRC/libplacebo/3rdparty/Vulkan-Headers"
 extract vulkan-headers "$SRC/libplacebo/3rdparty/Vulkan-Headers"
@@ -177,14 +183,12 @@ done
 
 # ---- 6. mpv → libmpv-2.dll ----
 # --auto-features=disabled：只开下面显式列出的特性（不带 lua / javascript / libarchive / 光盘 / 网络库等）。
-# HAVE_DXGI_DEBUG_D3D11：mpv 0.42 只在启用 d3d11 / egl-angle / vulkan 时检测 mingw-w64 头文件是否已定义
-# DXGI_DEBUG_D3D11，只开 d3d-hwaccel 时 vf_d3d11vpp 会重复定义它；llvm-mingw 的头文件已有定义。
 meson setup "$BUILD/mpv" "$SRC/mpv" --cross-file "$CROSS" --prefix "$PREFIX" --libdir lib \
   --buildtype release -Db_ndebug=true -Ddefault_library=shared -Dprefer_static=true --wrap-mode=nodownload \
   --auto-features=disabled -Dgpl=false -Dcplayer=false -Dlibmpv=true -Dbuild-date=false -Dtests=false \
   -Dgl=enabled -Dplain-gl=enabled -Dd3d-hwaccel=enabled -Dwasapi=enabled -Dwin32-threads=enabled \
   -Dzlib=enabled -Dvector=enabled \
-  -Dc_args="['-O2', '-DHAVE_DXGI_DEBUG_D3D11=1']" \
+\
   -Dc_link_args="['-static', '-Wl,--gc-sections']" \
   -Dcpp_link_args="['-static', '-Wl,--gc-sections']"
 ninja -C "$BUILD/mpv" -j "$JOBS"
