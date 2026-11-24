@@ -1,0 +1,14 @@
+mpv 0.42.0：只开 d3d-hwaccel（不开 d3d11 / egl-angle / vulkan）时，vf_d3d11vpp 需要的 d3d11_helpers.c 没有被编译，
+链接时缺少 mp_params_to_dxgi_colorspace / d3d11_get_csp_name，且 DXGI_DEBUG_D3D11 被重复定义。
+
+--- a/meson.build
++++ b/meson.build
+@@ -1386,7 +1386,7 @@
+     sources += files('video/filter/vf_gpu.c')
+ endif
+ 
+-if features['d3d11'] or features['egl-angle-win32'] or (features['vulkan'] and win32)
++if features['d3d11'] or features['egl-angle-win32'] or (features['vulkan'] and win32) or (win32 and get_option('d3d-hwaccel').allowed())
+     sources += files('video/out/gpu/d3d11_helpers.c')
+     features += {'dxgi-debug-d3d11': cc.has_header_symbol('d3d11sdklayers.h', 'DXGI_DEBUG_D3D11')}
+ endif

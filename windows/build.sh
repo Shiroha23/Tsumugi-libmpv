@@ -1,0 +1,322 @@
+#!/usr/bin/env bash
+# 在 Linux x86_64（CI 为 Ubuntu 24.04）上交叉编译 Windows x64 的 libmpv-2.dll（LGPL），供 Tsumugi 的 Windows 版使用。
+#
+# 用法：windows/build.sh <工作目录> <输出目录>
+#   需要：meson、ninja、nasm、pkg-config、python3、curl、xz、zip、binutils（strings）。
+#   交叉编译工具链（llvm-mingw，UCRT）由本脚本按 toolchain.tsv 下载并校验 sha256。
+#
+# 只用 sources.tsv 中按 sha256 校验过的发布包；所有依赖静态链接进 libmpv-2.dll（只依赖 Windows 系统 DLL）。
+# 输出：
+#   <TAG>.zip              libmpv-2.dll、libmpv.dll.a、include/*.h（media_kit 插件期望的扁平布局）、BUILD_INFO.txt
+#   <TAG>-sources.tar      对应源码：sources.tsv 中的全部发布包 + 本目录的构建脚本 + BUILD_INFO.txt
+#   SHA256SUMS
+set -euo pipefail
+
+HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+WORK=$(mkdir -p "$1" && cd "$1" && pwd)
+OUT=$(mkdir -p "$2" && cd "$2" && pwd)
+TAG=$(tr -d '[:space:]' < "$HERE/VERSION")
+TRIPLE=x86_64-w64-mingw32
+PREFIX=$WORK/prefix
+DL=$WORK/dl
+SRC=$WORK/src
+BUILD=$WORK/build
+JOBS=$(nproc)
+
+rm -rf "$SRC" "$BUILD" "$PREFIX"
+mkdir -p "$DL" "$SRC" "$BUILD" "$PREFIX"
+
+# 从源码包重新构建时（本脚本位于 <TAG>-sources/build-scripts/），优先使用包内 tarballs/ 中的归档。
+BUNDLED=$(cd "$HERE/.." && pwd)/tarballs
+
+fetch() { # fetch <地址> <sha256> <保存路径>
+  local url=$1 sha=$2 dest=$3 tmp
+  if [[ -f "$dest" ]] && echo "$sha  $dest" | sha256sum -c --status -; then
+    return
+  fi
+  rm -f "$dest"
+  if [[ -f "$BUNDLED/$(basename "$dest")" ]]; then
+    cp "$BUNDLED/$(basename "$dest")" "$dest.bundled"
+    tmp=$dest.bundled
+  else
+    # 只用 https（含每次重定向）；限制连接 / 总时长与大小，校验通过后才放入缓存。
+    tmp=$(mktemp "$dest.XXXXXX")
+    curl -fsSL --retry 3 --proto '=https' --proto-redir '=https' --connect-timeout 30 --max-time 1800 \
+      --max-filesize 314572800 -o "$tmp" "$url" || { rm -f "$tmp"; return 1; }
+  fi
+  if ! echo "$sha  $tmp" | sha256sum -c --status -; then
+    echo "sha256 mismatch: $url" >&2
+    rm -f "$tmp"
+    return 1
+  fi
+  mv "$tmp" "$dest"
+  echo "$sha  $dest" | sha256sum -c -
+}
+
+# ---- 0. 工具链 ----
+IFS=$'\t' read -r TC_NAME TC_VERSION TC_URL TC_SHA TC_FILE < <(grep -v '^#' "$HERE/toolchain.tsv")
+fetch "$TC_URL" "$TC_SHA" "$DL/$TC_FILE"
+rm -rf "$WORK/toolchain"; mkdir -p "$WORK/toolchain"
+tar -xf "$DL/$TC_FILE" -C "$WORK/toolchain" --strip-components=1
+export PATH="$WORK/toolchain/bin:$PATH"
+
+# ---- 1. 下载并校验 ----
+declare -A FILE
+while IFS=$'\t' read -r name version license url sha file; do
+  [[ -z "$name" || "$name" == \#* ]] && continue
+  fetch "$url" "$sha" "$DL/$file"
+  FILE[$name]=$DL/$file
+done < "$HERE/sources.tsv"
+
+extract() { # extract <组件> <目标目录>
+  mkdir -p "$2"
+  tar -xf "${FILE[$1]}" -C "$2" --strip-components=1
+}
+for name in mpv ffmpeg libplacebo libass freetype harfbuzz fribidi dav1d zlib; do
+  extract "$name" "$SRC/$name"
+done
+for sub in glad jinja markupsafe fast_float; do
+  rm -rf "$SRC/libplacebo/3rdparty/$sub"
+  extract "$sub" "$SRC/libplacebo/3rdparty/$sub"
+done
+# 本仓库的补丁（windows/patches/<组件>-*.patch，-p1），说明写在各补丁文件开头。
+for patch in "$HERE"/patches/*.patch; do
+  [[ -e "$patch" ]] || continue
+  component=$(basename "$patch"); component=${component%%-*}
+  patch -d "$SRC/$component" -p1 --forward < "$patch"
+done
+# libplacebo 的 Vulkan 桩代码（即使不启用 Vulkan 后端）需要这份头文件子模块。
+rm -rf "$SRC/libplacebo/3rdparty/Vulkan-Headers"
+extract vulkan-headers "$SRC/libplacebo/3rdparty/Vulkan-Headers"
+
+# ---- 2. 交叉编译环境 ----
+export PKG_CONFIG_LIBDIR="$PREFIX/lib/pkgconfig"
+export PKG_CONFIG_PATH=
+export PKG_CONFIG_SYSROOT_DIR=
+CROSS=$WORK/cross.txt
+cat > "$CROSS" <<EOF
+[binaries]
+c = '$TRIPLE-clang'
+cpp = '$TRIPLE-clang++'
+ar = '$TRIPLE-ar'
+strip = '$TRIPLE-strip'
+windres = '$TRIPLE-windres'
+dlltool = '$TRIPLE-dlltool'
+nasm = 'nasm'
+pkg-config = 'pkg-config'
+
+[built-in options]
+c_args = ['-O2']
+cpp_args = ['-O2']
+
+[host_machine]
+system = 'windows'
+cpu_family = 'x86_64'
+cpu = 'x86_64'
+endian = 'little'
+EOF
+
+meson_static() { # meson_static <组件> [选项…]
+  local name=$1; shift
+  meson setup "$BUILD/$name" "$SRC/$name" --cross-file "$CROSS" --prefix "$PREFIX" --libdir lib \
+    --buildtype release -Db_ndebug=true -Ddefault_library=static --wrap-mode=nodownload "$@"
+  ninja -C "$BUILD/$name" -j "$JOBS"
+  ninja -C "$BUILD/$name" install
+}
+
+# ---- 3. 依赖（全部静态库） ----
+(
+  cd "$SRC/zlib"
+  CHOST=$TRIPLE CC=$TRIPLE-clang AR=$TRIPLE-ar RANLIB=$TRIPLE-ranlib ./configure --static --prefix="$PREFIX"
+  make -j "$JOBS" libz.a
+  make install-libs install-headers 2>/dev/null || make install
+)
+[[ -f "$PREFIX/lib/pkgconfig/zlib.pc" ]] || { echo 'zlib.pc missing' >&2; exit 1; }
+
+meson_static freetype -Dbrotli=disabled -Dharfbuzz=disabled -Dpng=disabled -Dzlib=system \
+  -Dtests=disabled
+meson_static fribidi -Ddocs=false -Dbin=false -Dtests=false
+meson_static harfbuzz -Dfreetype=enabled -Dglib=disabled -Dgobject=disabled -Dcairo=disabled -Dchafa=disabled \
+  -Dicu=disabled -Dgraphite=disabled -Dfontations=disabled -Dgdi=disabled -Ddirectwrite=disabled \
+  -Dcoretext=disabled -Dharfrust=disabled -Dkbts=disabled -Dwasm=disabled -Draster=disabled -Dvector=disabled \
+  -Dgpu=disabled -Dgpu_demo=disabled -Dsubset=disabled -Dtests=disabled -Dintrospection=disabled -Ddocs=disabled \
+  -Dutilities=disabled -Dbenchmark=disabled -Dpng=disabled -Dzlib=disabled
+meson_static libass -Dfontconfig=disabled -Ddirectwrite=enabled -Dcoretext=disabled -Dasm=enabled \
+  -Dlibunibreak=disabled -Drequire-system-font-provider=false -Dtest=disabled -Dcompare=disabled \
+  -Dprofile=disabled -Dfuzz=disabled -Dcheckasm=disabled
+meson_static dav1d -Denable_tools=false -Denable_examples=false -Denable_tests=false -Denable_docs=false \
+  -Dbitdepths="['8','16']"
+
+# ---- 4. FFmpeg（LGPL-3.0+：--enable-version3，不加 --enable-gpl / --enable-nonfree；与 Android / iOS 的构建一致） ----
+# 只保留播放需要的部分：协议只有 http / tcp（Tsumugi 的所有播放请求经其本地媒体代理，FFmpeg 的协议白名单只有 http,tcp），
+# 不带 TLS、不带 DASH（apiVersion 1 不支持）、不带 rtmp / rtsp / udp / file 等。
+FF_DECODERS=(
+  h264 hevc vp8 vp9 av1 libdav1d mpeg1video mpeg2video mpeg4 h263 h263p flv vp6 vp6a vp6f theora
+  msmpeg4v1 msmpeg4v2 msmpeg4v3 wmv1 wmv2 wmv3 vc1 mjpeg png webp bmp
+  aac aac_latm ac3 eac3 mp1 mp1float mp2 mp2float mp3 mp3float opus vorbis flac alac dca truehd mlp wmav1 wmav2
+  wmapro wavpack
+  ass ssa srt subrip webvtt movtext text dvbsub dvdsub pgssub
+)
+FF_DEMUXERS=(
+  hls mpegts mpegtsraw mov matroska flv live_flv avi asf mpegps mpegvideo h264 hevc m4v av1 aac ac3 eac3 mp3
+  flac ogg wav w64 latm loas dts dtshd truehd wv webvtt srt ass image2 image_png_pipe image_jpeg_pipe image_webp_pipe
+)
+FF_PARSERS=(
+  h264 hevc vp8 vp9 av1 mpeg4video mpegvideo h263 vc1 mjpeg png webp aac aac_latm ac3 mpegaudio flac opus vorbis
+  dca mlp dvbsub dvdsub
+)
+FF_BSFS=(h264_mp4toannexb hevc_mp4toannexb aac_adtstoasc extract_extradata vp9_superframe_split av1_frame_split
+  av1_frame_merge null)
+FF_FILTERS=(buffer buffersink abuffer abuffersink format aformat null anull aresample scale)
+join() { local IFS=,; echo "$*"; }
+mkdir -p "$BUILD/ffmpeg"
+FF_CONFIGURE=(
+  --prefix="$PREFIX" --arch=x86_64 --target-os=mingw32 --cross-prefix="$TRIPLE-" --enable-cross-compile
+  --cc="$TRIPLE-clang" --cxx="$TRIPLE-clang++" --pkg-config=pkg-config --pkg-config-flags=--static
+  --enable-version3 --enable-static --disable-shared --disable-programs --disable-doc --disable-debug --disable-autodetect
+  --disable-everything --disable-avdevice
+  --enable-avcodec --enable-avformat --enable-avfilter --enable-swscale --enable-swresample --enable-network
+  --enable-w32threads --enable-d3d11va --enable-dxva2 --enable-zlib --enable-libdav1d --enable-runtime-cpudetect
+  --enable-protocol=http,tcp
+  --enable-decoder="$(join "${FF_DECODERS[@]}")" --enable-decoder='pcm_*'
+  --enable-demuxer="$(join "${FF_DEMUXERS[@]}")"
+  --enable-parser="$(join "${FF_PARSERS[@]}")"
+  --enable-bsf="$(join "${FF_BSFS[@]}")"
+  --enable-filter="$(join "${FF_FILTERS[@]}")"
+  --enable-hwaccel='*_d3d11va,*_d3d11va2,*_dxva2'
+)
+(cd "$BUILD/ffmpeg" && "$SRC/ffmpeg/configure" "${FF_CONFIGURE[@]}")
+make -C "$BUILD/ffmpeg" -j "$JOBS"
+make -C "$BUILD/ffmpeg" install
+
+# ---- 5. libplacebo（mpv 0.37 起必需；只要 OpenGL 后端） ----
+meson_static libplacebo -Dvulkan=disabled -Dvk-proc-addr=disabled -Dopengl=enabled -Dgl-proc-addr=disabled \
+  -Dd3d11=disabled -Dglslang=disabled -Dshaderc=disabled -Dlcms=disabled -Ddovi=enabled -Dlibdovi=disabled \
+  -Ddemos=false -Dtests=false -Dbench=false -Dfuzz=false -Dunwind=disabled -Dxxhash=disabled
+
+# libplacebo / HarfBuzz 含 C++ 代码，而 mpv 用 C 编译器链接：静态链接时需要显式带上 libc++ 与 libunwind。
+for pc in libplacebo harfbuzz; do
+  grep -q -- '-lc++' "$PREFIX/lib/pkgconfig/$pc.pc" ||
+    sed -i 's/^Libs.private:/Libs.private: -lc++ -lunwind/; t; $a Libs.private: -lc++ -lunwind' "$PREFIX/lib/pkgconfig/$pc.pc"
+done
+
+# ---- 6. mpv → libmpv-2.dll ----
+# --auto-features=disabled：只开下面显式列出的特性（不带 lua / javascript / libarchive / 光盘 / 网络库等）。
+meson setup "$BUILD/mpv" "$SRC/mpv" --cross-file "$CROSS" --prefix "$PREFIX" --libdir lib \
+  --buildtype release -Db_ndebug=true -Ddefault_library=shared -Dprefer_static=true --wrap-mode=nodownload \
+  --auto-features=disabled -Dgpl=false -Dcplayer=false -Dlibmpv=true -Dbuild-date=false -Dtests=false \
+  -Dgl=enabled -Dplain-gl=enabled -Dd3d-hwaccel=enabled -Dwasapi=enabled -Dwin32-threads=enabled \
+  -Dzlib=enabled -Dvector=enabled \
+\
+  -Dc_link_args="['-static', '-Wl,--gc-sections']" \
+  -Dcpp_link_args="['-static', '-Wl,--gc-sections']"
+ninja -C "$BUILD/mpv" -j "$JOBS"
+ninja -C "$BUILD/mpv" install
+
+# ---- 7. 检查与打包 ----
+DLL=$PREFIX/bin/libmpv-2.dll
+IMPLIB=$PREFIX/lib/libmpv.dll.a
+[[ -f "$DLL" && -f "$IMPLIB" ]] || { echo 'libmpv-2.dll / libmpv.dll.a missing' >&2; exit 1; }
+"$TRIPLE-strip" --strip-unneeded "$DLL"
+
+# 许可证门禁：FFmpeg 必须是 LGPL，且没有 GPL / nonfree 组件。
+strings "$DLL" > "$WORK/strings.txt"
+grep -q 'LGPL version 3 or later' "$WORK/strings.txt" || { echo 'FFmpeg license string not LGPL' >&2; exit 1; }
+if grep -E -- '--enable-(gpl|nonfree)' "$WORK/strings.txt"; then
+  echo 'FFmpeg configured with GPL / nonfree' >&2; exit 1
+fi
+python3 - "$BUILD/mpv/meson-info/intro-buildoptions.json" <<'PY'
+import json, sys
+opts = {o["name"]: o["value"] for o in json.load(open(sys.argv[1]))}
+if opts.get("gpl") is not False:
+    sys.exit("mpv gpl option is not false")
+PY
+
+# 只允许依赖 Windows 系统 DLL（全部第三方组件都应静态链接）。
+"$TRIPLE-objdump" -p "$DLL" | awk '/DLL Name:/ {print tolower($3)}' | sort -u > "$WORK/imports.txt"
+SYSTEM_DLLS='^(kernel32|user32|gdi32|advapi32|shell32|ole32|oleaut32|shlwapi|ws2_32|bcrypt|avrt|winmm|dwrite|d3d11|dxgi|d3d9|dxva2|uuid|version|secur32|ntdll|msvcrt|api-ms-win-[a-z0-9-]+|ucrtbase|mfplat|mfuuid|strmiids|propsys|imm32|comdlg32|uxtheme|dwmapi|powrprof|setupapi|cfgmgr32|opengl32|pathcch|shcore)\.dll$'
+if grep -v -E "$SYSTEM_DLLS" "$WORK/imports.txt"; then
+  echo 'libmpv-2.dll imports non-system DLLs (listed above)' >&2; exit 1
+fi
+
+PKG=$WORK/pkg/$TAG
+rm -rf "$WORK/pkg"; mkdir -p "$PKG/include"
+cp "$DLL" "$IMPLIB" "$PKG/"
+cp "$PREFIX"/include/mpv/*.h "$PKG/include/"
+
+# 许可证与版权声明：随 DLL 分发的每个组件（含静态链接的工具链运行库）。
+LIC=$PKG/licenses
+copy_license() { # copy_license <名称> <文件…>：至少要找到一个文件
+  local name=$1 found=0 f; shift
+  mkdir -p "$LIC/$name"
+  for f in "$@"; do
+    if [[ -f "$f" ]]; then cp "$f" "$LIC/$name/"; found=1; fi
+  done
+  [[ $found = 1 ]] || { echo "license files for $name not found: $*" >&2; exit 1; }
+}
+copy_license mpv "$SRC/mpv/LICENSE.LGPL" "$SRC/mpv/Copyright"
+copy_license ffmpeg "$SRC/ffmpeg/LICENSE.md" "$SRC/ffmpeg/COPYING.LGPLv3" "$SRC/ffmpeg/COPYING.LGPLv2.1"   "$SRC/ffmpeg/COPYING.GPLv3"
+copy_license libplacebo "$SRC/libplacebo/LICENSE"
+copy_license glad "$SRC/libplacebo/3rdparty/glad/LICENSE"
+copy_license fast_float "$SRC/libplacebo/3rdparty/fast_float/LICENSE-MIT"
+copy_license libass "$SRC/libass/COPYING"
+copy_license freetype "$SRC/freetype/LICENSE.TXT" "$SRC/freetype/docs/FTL.TXT"
+copy_license harfbuzz "$SRC/harfbuzz/COPYING"
+copy_license fribidi "$SRC/fribidi/COPYING"
+copy_license dav1d "$SRC/dav1d/COPYING"
+copy_license zlib "$SRC/zlib/LICENSE"
+# 静态链接的工具链运行库（mingw-w64 CRT、winpthreads、LLVM libc++ / libunwind / compiler-rt）：文本在 licenses/。
+copy_license toolchain-runtime "$HERE/licenses/llvm-runtime.txt" "$HERE/licenses/mingw-w64.txt" \
+  "$HERE/licenses/winpthreads.txt"
+{
+  echo "# $TAG"
+  echo "# 由 Tsumugi-libmpv 仓库的 windows/build.sh 构建。"
+  echo
+  echo "## 源码（sources.tsv）"
+  grep -v '^#' "$HERE/sources.tsv"
+  echo
+  echo "## 工具链"
+  echo "$TC_NAME $TC_VERSION ($TC_FILE, sha256 $TC_SHA)"
+  "$TRIPLE-clang" --version | head -1
+  echo "meson $(meson --version)"
+  echo "ninja $(ninja --version)"
+  nasm -v
+  echo
+  echo "## FFmpeg configure"
+  printf '%q ' "${FF_CONFIGURE[@]}" | sed "s#$PREFIX#<prefix>#g"
+  echo
+  echo
+  echo "## mpv 实际启用的特性（config.h 中为 1 的 HAVE_*）"
+  sed -n 's/^#define HAVE_\([A-Z0-9_]*\) 1$/\1/p' "$BUILD/mpv/config.h" | tr 'A-Z_' 'a-z-' | sort | tr '\n' ' '
+  echo
+  echo
+  echo "## mpv meson 选项（gpl / libmpv / cplayer 与显式开启的特性；其余为 auto，被 --auto-features=disabled 关闭）"
+  python3 - "$BUILD/mpv/meson-info/intro-buildoptions.json" <<'PY'
+import json, sys
+for o in json.load(open(sys.argv[1])):
+    if o["section"] == "user" and o["value"] not in ("auto",):
+        print(f'{o["name"]}={o["value"]}')
+PY
+  echo
+  echo "## libmpv-2.dll 导入的 DLL"
+  cat "$WORK/imports.txt"
+} > "$PKG/BUILD_INFO.txt"
+
+rm -f "$OUT/$TAG.zip" "$OUT/$TAG-sources.tar"
+(cd "$WORK/pkg" && zip -qr -X "$OUT/$TAG.zip" "$TAG")
+
+SRCPKG=$WORK/srcpkg/$TAG-sources
+rm -rf "$WORK/srcpkg"; mkdir -p "$SRCPKG/tarballs" "$SRCPKG/build-scripts"
+while IFS=$'\t' read -r name version license url sha file; do
+  [[ -z "$name" || "$name" == \#* ]] && continue
+  cp "$DL/$file" "$SRCPKG/tarballs/"
+done < "$HERE/sources.tsv"
+cp -r "$HERE"/. "$SRCPKG/build-scripts/"
+[[ -f "$HERE/../LICENSE" ]] && cp "$HERE/../LICENSE" "$SRCPKG/LICENSE"
+cp -r "$PKG/licenses" "$SRCPKG/licenses"
+cp "$PKG/BUILD_INFO.txt" "$SRCPKG/"
+tar --sort=name --owner=0 --group=0 --numeric-owner --mtime='2000-01-01 00:00Z' \
+  -cf "$OUT/$TAG-sources.tar" -C "$WORK/srcpkg" "$TAG-sources"
+
+(cd "$OUT" && sha256sum "$TAG.zip" "$TAG-sources.tar" > SHA256SUMS && cat SHA256SUMS)
+ls -l "$DLL" "$OUT"

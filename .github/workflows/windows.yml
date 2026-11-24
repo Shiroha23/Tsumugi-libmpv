@@ -1,0 +1,108 @@
+name: Windows libmpv
+
+# Windows x64 的 libmpv-2.dll（mpv + FFmpeg，LGPL）。
+# - PR 与推送到 main：只构建并上传为工作流产物（检查脚本）。
+# - 手动运行且 publish=true（只在 main 上）：构建、生成来源证明，并以 windows/VERSION 为标签发布 Release，
+#   附 <TAG>.zip（DLL、导入库、头文件、BUILD_INFO.txt）、<TAG>-sources.tar（对应源码与构建脚本）与 SHA256SUMS。
+#   标签已存在时失败：发布只增不改，修订号 -r<n> 递增。
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "发布 Release（标签取 windows/VERSION）"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build libmpv-2.dll
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: tag
+        run: echo "tag=$(tr -d '[:space:]' < windows/VERSION)" >> "$GITHUB_OUTPUT"
+      - name: Install build tools
+        timeout-minutes: 15
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          # 交叉编译工具链（llvm-mingw）由 build.sh 按 toolchain.tsv 下载并校验；这里只装宿主上的构建工具。
+          sudo apt-get update
+          sudo -E apt-get install -y --no-install-recommends -o Dpkg::Use-Pty=0 nasm
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install --disable-pip-version-check meson==1.6.1 ninja==1.11.1.3
+          echo "$RUNNER_TEMP/venv/bin" >> "$GITHUB_PATH"
+      - name: Build
+        run: bash windows/build.sh "$RUNNER_TEMP/libmpv-work" out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: libmpv-windows
+          path: out/
+          retention-days: 14
+
+  publish:
+    name: Publish release
+    needs: build
+    if: github.event_name == 'workflow_dispatch' && inputs.publish && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: libmpv-windows
+          path: out
+      - name: Verify checksums
+        run: cd out && sha256sum -c SHA256SUMS
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            out/*.zip
+            out/*.tar
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.build.outputs.tag }}
+          SHA: ${{ github.sha }}
+        run: |
+          cd out
+          # 发布只增不改：同名 Release 已存在，或无法新建指向本次提交的标签（标签已存在 / API 失败）时终止。
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; bump the -r<n> revision in windows/VERSION." >&2
+            exit 1
+          fi
+          if ! gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+              -f ref="refs/tags/$TAG" -f sha="$SHA" >/dev/null; then
+            echo "Cannot create tag $TAG at $SHA (it may already exist); bump the -r<n> revision." >&2
+            exit 1
+          fi
+          {
+            echo "Windows x64 libmpv-2.dll，构建自提交 $SHA（windows/build.sh 与 windows/sources.tsv）。"
+            echo
+            echo "- \`$TAG.zip\`：libmpv-2.dll、libmpv.dll.a、include/*.h、licenses/、BUILD_INFO.txt"
+            echo "- \`$TAG-sources.tar\`：对应源码（全部源码发布包、构建脚本与补丁、licenses/、LICENSE、BUILD_INFO.txt）"
+            echo "- 来源证明：\`gh attestation verify <文件> --repo $GITHUB_REPOSITORY\`"
+            echo
+            echo '```'
+            cat SHA256SUMS
+            echo '```'
+          } > notes.md
+          # 不可变 Release：先建草稿上传全部资产，再发布。
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --draft \
+            --title "$TAG" --notes-file notes.md "$TAG.zip" "$TAG-sources.tar" SHA256SUMS
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest
