@@ -263,7 +263,7 @@ while IFS=$'\t' read -r name version license url sha file; do
   [[ -z "$name" || "$name" == \#* ]] && continue
   cp "$DL/$file" "$SRCPKG/tarballs/"
 done < "$HERE/sources.tsv"
-cp "$HERE"/* "$SRCPKG/build-scripts/"
+cp -r "$HERE"/. "$SRCPKG/build-scripts/"
 cp "$PKG/BUILD_INFO.txt" "$SRCPKG/"
 tar --sort=name --owner=0 --group=0 --numeric-owner --mtime='2000-01-01 00:00Z' \
   -cf "$OUT/$TAG-sources.tar" -C "$WORK/srcpkg" "$TAG-sources"
