@@ -81,15 +81,21 @@ jobs:
           SHA: ${{ github.sha }}
         run: |
           cd out
+          # 发布只增不改：同名 Release 已存在，或无法新建指向本次提交的标签（标签已存在 / API 失败）时终止。
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo "Release $TAG already exists; bump the -r<n> revision in windows/VERSION." >&2
+            exit 1
+          fi
+          if ! gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+              -f ref="refs/tags/$TAG" -f sha="$SHA" >/dev/null; then
+            echo "Cannot create tag $TAG at $SHA (it may already exist); bump the -r<n> revision." >&2
             exit 1
           fi
           {
             echo "Windows x64 libmpv-2.dll，构建自提交 $SHA（windows/build.sh 与 windows/sources.tsv）。"
             echo
-            echo "- \`$TAG.zip\`：libmpv-2.dll、libmpv.dll.a、include/*.h、BUILD_INFO.txt"
-            echo "- \`$TAG-sources.tar\`：对应源码（全部源码发布包、构建脚本、BUILD_INFO.txt）"
+            echo "- \`$TAG.zip\`：libmpv-2.dll、libmpv.dll.a、include/*.h、licenses/、BUILD_INFO.txt"
+            echo "- \`$TAG-sources.tar\`：对应源码（全部源码发布包、构建脚本与补丁、licenses/、LICENSE、BUILD_INFO.txt）"
             echo "- 来源证明：\`gh attestation verify <文件> --repo $GITHUB_REPOSITORY\`"
             echo
             echo '```'
@@ -97,6 +103,6 @@ jobs:
             echo '```'
           } > notes.md
           # 不可变 Release：先建草稿上传全部资产，再发布。
-          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$SHA" --draft \
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --draft \
             --title "$TAG" --notes-file notes.md "$TAG.zip" "$TAG-sources.tar" SHA256SUMS
           gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest

@@ -26,12 +26,31 @@ JOBS=$(nproc)
 rm -rf "$SRC" "$BUILD" "$PREFIX"
 mkdir -p "$DL" "$SRC" "$BUILD" "$PREFIX"
 
+# 从源码包重新构建时（本脚本位于 <TAG>-sources/build-scripts/），优先使用包内 tarballs/ 中的归档。
+BUNDLED=$(cd "$HERE/.." && pwd)/tarballs
+
 fetch() { # fetch <地址> <sha256> <保存路径>
-  if [[ ! -f "$3" ]] || ! echo "$2  $3" | sha256sum -c --status -; then
-    curl -fsSL --retry 3 --proto '=https' -o "$3.part" "$1"
-    mv "$3.part" "$3"
+  local url=$1 sha=$2 dest=$3 tmp
+  if [[ -f "$dest" ]] && echo "$sha  $dest" | sha256sum -c --status -; then
+    return
   fi
-  echo "$2  $3" | sha256sum -c -
+  rm -f "$dest"
+  if [[ -f "$BUNDLED/$(basename "$dest")" ]]; then
+    cp "$BUNDLED/$(basename "$dest")" "$dest.bundled"
+    tmp=$dest.bundled
+  else
+    # 只用 https（含每次重定向）；限制连接 / 总时长与大小，校验通过后才放入缓存。
+    tmp=$(mktemp "$dest.XXXXXX")
+    curl -fsSL --retry 3 --proto '=https' --proto-redir '=https' --connect-timeout 30 --max-time 1800 \
+      --max-filesize 314572800 -o "$tmp" "$url" || { rm -f "$tmp"; return 1; }
+  fi
+  if ! echo "$sha  $tmp" | sha256sum -c --status -; then
+    echo "sha256 mismatch: $url" >&2
+    rm -f "$tmp"
+    return 1
+  fi
+  mv "$tmp" "$dest"
+  echo "$sha  $dest" | sha256sum -c -
 }
 
 # ---- 0. 工具链 ----
@@ -135,7 +154,7 @@ FF_DECODERS=(
   h264 hevc vp8 vp9 av1 libdav1d mpeg1video mpeg2video mpeg4 h263 h263p flv vp6 vp6a vp6f theora
   msmpeg4v1 msmpeg4v2 msmpeg4v3 wmv1 wmv2 wmv3 vc1 mjpeg png webp bmp
   aac aac_latm ac3 eac3 mp1 mp1float mp2 mp2float mp3 mp3float opus vorbis flac alac dca truehd mlp wmav1 wmav2
-  wmapro wavpack pcm_s16le pcm_s16be pcm_s24le pcm_s32le pcm_f32le pcm_u8 pcm_alaw pcm_mulaw
+  wmapro wavpack
   ass ssa srt subrip webvtt movtext text dvbsub dvdsub pgssub
 )
 FF_DEMUXERS=(
@@ -159,7 +178,7 @@ FF_CONFIGURE=(
   --enable-avcodec --enable-avformat --enable-avfilter --enable-swscale --enable-swresample --enable-network
   --enable-w32threads --enable-d3d11va --enable-dxva2 --enable-zlib --enable-libdav1d --enable-runtime-cpudetect
   --enable-protocol=http,tcp
-  --enable-decoder="$(join "${FF_DECODERS[@]}")"
+  --enable-decoder="$(join "${FF_DECODERS[@]}")" --enable-decoder='pcm_*'
   --enable-demuxer="$(join "${FF_DEMUXERS[@]}")"
   --enable-parser="$(join "${FF_PARSERS[@]}")"
   --enable-bsf="$(join "${FF_BSFS[@]}")"
@@ -224,6 +243,31 @@ PKG=$WORK/pkg/$TAG
 rm -rf "$WORK/pkg"; mkdir -p "$PKG/include"
 cp "$DLL" "$IMPLIB" "$PKG/"
 cp "$PREFIX"/include/mpv/*.h "$PKG/include/"
+
+# 许可证与版权声明：随 DLL 分发的每个组件（含静态链接的工具链运行库）。
+LIC=$PKG/licenses
+copy_license() { # copy_license <名称> <文件…>：至少要找到一个文件
+  local name=$1 found=0 f; shift
+  mkdir -p "$LIC/$name"
+  for f in "$@"; do
+    if [[ -f "$f" ]]; then cp "$f" "$LIC/$name/"; found=1; fi
+  done
+  [[ $found = 1 ]] || { echo "license files for $name not found: $*" >&2; exit 1; }
+}
+copy_license mpv "$SRC/mpv/LICENSE.LGPL" "$SRC/mpv/Copyright"
+copy_license ffmpeg "$SRC/ffmpeg/LICENSE.md" "$SRC/ffmpeg/COPYING.LGPLv3" "$SRC/ffmpeg/COPYING.LGPLv2.1"   "$SRC/ffmpeg/COPYING.GPLv3"
+copy_license libplacebo "$SRC/libplacebo/LICENSE"
+copy_license glad "$SRC/libplacebo/3rdparty/glad/LICENSE"
+copy_license fast_float "$SRC/libplacebo/3rdparty/fast_float/LICENSE-MIT"
+copy_license libass "$SRC/libass/COPYING"
+copy_license freetype "$SRC/freetype/LICENSE.TXT" "$SRC/freetype/docs/FTL.TXT"
+copy_license harfbuzz "$SRC/harfbuzz/COPYING"
+copy_license fribidi "$SRC/fribidi/COPYING"
+copy_license dav1d "$SRC/dav1d/COPYING"
+copy_license zlib "$SRC/zlib/LICENSE"
+# 静态链接的工具链运行库（mingw-w64 CRT、winpthreads、LLVM libc++ / libunwind / compiler-rt）：文本在 licenses/。
+copy_license toolchain-runtime "$HERE/licenses/llvm-runtime.txt" "$HERE/licenses/mingw-w64.txt" \
+  "$HERE/licenses/winpthreads.txt"
 {
   echo "# $TAG"
   echo "# 由 Tsumugi-libmpv 仓库的 windows/build.sh 构建。"
@@ -268,6 +312,8 @@ while IFS=$'\t' read -r name version license url sha file; do
   cp "$DL/$file" "$SRCPKG/tarballs/"
 done < "$HERE/sources.tsv"
 cp -r "$HERE"/. "$SRCPKG/build-scripts/"
+[[ -f "$HERE/../LICENSE" ]] && cp "$HERE/../LICENSE" "$SRCPKG/LICENSE"
+cp -r "$PKG/licenses" "$SRCPKG/licenses"
 cp "$PKG/BUILD_INFO.txt" "$SRCPKG/"
 tar --sort=name --owner=0 --group=0 --numeric-owner --mtime='2000-01-01 00:00Z' \
   -cf "$OUT/$TAG-sources.tar" -C "$WORK/srcpkg" "$TAG-sources"

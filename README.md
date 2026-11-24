@@ -26,9 +26,16 @@ bash windows/build.sh <工作目录> <输出目录>
 
 - `windows/sources.tsv`：全部组件的版本、许可证、下载地址与 sha256；脚本只用校验通过的源码包。
 - `windows/toolchain.tsv`：交叉编译工具链的版本、下载地址与 sha256。
+- `windows/patches/`：对上游发布包的补丁（每个文件开头写明原因），按文件名前缀应用到对应组件：
+  - `mpv-0.42.0-d3d11-helpers-for-d3d-hwaccel.patch`：只开 `d3d-hwaccel` 时补编 `d3d11_helpers.c`（否则链接失败）。
+  - `ffmpeg-8.1.3-no-env-http-proxy.patch`：FFmpeg 的 http 协议不从环境变量 `http_proxy` 取代理（Tsumugi 的播放器只连接本地媒体代理）。
+- `windows/licenses/`：静态链接进 DLL 的工具链运行库的许可证文本。
 - `windows/build.sh`：配置与编译步骤，最后检查许可证（FFmpeg 必须是 LGPL、不含 GPL / nonfree 组件，mpv 以 `-Dgpl=false` 构建）
   和导入表（只允许 Windows 系统 DLL）。
-- 输出 `<TAG>.zip`（`libmpv-2.dll`、`libmpv.dll.a`、`include/*.h`、`BUILD_INFO.txt`）、`<TAG>-sources.tar`（对应源码）与 `SHA256SUMS`。
+- 输出 `<TAG>.zip`（`libmpv-2.dll`、`libmpv.dll.a`、`include/*.h`、`licenses/`、`BUILD_INFO.txt`）、`<TAG>-sources.tar`
+  （对应源码：`tarballs/` 全部源码发布包、`build-scripts/`、`licenses/`、`LICENSE`、`BUILD_INFO.txt`）与 `SHA256SUMS`。
+- 从源码包重新构建：解开 `<TAG>-sources.tar` 后运行 `build-scripts/build.sh <工作目录> <输出目录>`，脚本优先使用包内的 `tarballs/`
+  （同样校验 sha256）；交叉工具链仍按 `build-scripts/toolchain.tsv` 下载（或预先放入 `<工作目录>/dl/`）。
 
 ## 发布
 
