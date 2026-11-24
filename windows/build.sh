@@ -177,11 +177,14 @@ done
 
 # ---- 6. mpv → libmpv-2.dll ----
 # --auto-features=disabled：只开下面显式列出的特性（不带 lua / javascript / libarchive / 光盘 / 网络库等）。
+# HAVE_DXGI_DEBUG_D3D11：mpv 0.42 只在启用 d3d11 / egl-angle / vulkan 时检测 mingw-w64 头文件是否已定义
+# DXGI_DEBUG_D3D11，只开 d3d-hwaccel 时 vf_d3d11vpp 会重复定义它；llvm-mingw 的头文件已有定义。
 meson setup "$BUILD/mpv" "$SRC/mpv" --cross-file "$CROSS" --prefix "$PREFIX" --libdir lib \
   --buildtype release -Db_ndebug=true -Ddefault_library=shared -Dprefer_static=true --wrap-mode=nodownload \
   --auto-features=disabled -Dgpl=false -Dcplayer=false -Dlibmpv=true -Dbuild-date=false -Dtests=false \
   -Dgl=enabled -Dplain-gl=enabled -Dd3d-hwaccel=enabled -Dwasapi=enabled -Dwin32-threads=enabled \
   -Dzlib=enabled -Dvector=enabled \
+  -Dc_args="['-O2', '-DHAVE_DXGI_DEBUG_D3D11=1']" \
   -Dc_link_args="['-static', '-Wl,--gc-sections']" \
   -Dcpp_link_args="['-static', '-Wl,--gc-sections']"
 ninja -C "$BUILD/mpv" -j "$JOBS"
